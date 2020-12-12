@@ -37,7 +37,8 @@ AS
 	   
 	IF RIGHT(@Schema, 1) = ']' SET @Schema = LEFT(@Schema, LEN(@Schema) - 1)
 	IF RIGHT(@Table, 1) = ']' SET @Table = LEFT(@Table, LEN(@Table) - 1)
-	
+
+	SET @SourceTable = '[' + @Schema + '].[' + @Table + ']'
 
 	----
 	DECLARE
@@ -46,7 +47,6 @@ AS
 			
 		@primaryFieldsList VARCHAR(1000), 
 		@sql NVARCHAR(MAX)
-
 	
 			
 	DECLARE @fieldsUpdate TABLE (Id INT IDENTITY, Line VARCHAR(MAX))
@@ -170,14 +170,14 @@ IF @IsForSSDT = 1
 BEGIN
 	INSERT @res	(Line) 
 	VALUES 
-		('PRINT ''Update rows in [' + @Schema + '].[' + @Table + ']'''),
+		('PRINT ''Update rows in ' + @SourceTable + ''''),
 		('GO'),
 		('')
 END
 
 INSERT @res (Line) 
 VALUES 
-	('MERGE ' + ISNULL(@TargetTable, '[' + @Schema + '].[' + @Table +']') + ' AS t /* Target */'), 
+	('MERGE ' + ISNULL(@TargetTable, @SourceTable) + ' AS t /* Target */'), 
 	('USING'), 
 	('(')
 
@@ -187,7 +187,7 @@ BEGIN
 	VALUES 
 		('	VALUES ')
 
-	SET @sql = 'SELECT ''	(' + @SelectValuesList + '),'' FROM [' + @Schema + '].[' + @Table +']' + ISNULL(' WHERE ' + @SourceSearchCondition, '')
+	SET @sql = 'SELECT ''	(' + @SelectValuesList + '),'' FROM ' + @SourceTable + ISNULL(' WHERE ' + @SourceSearchCondition, '')
 	--print @sql
 	INSERT @res(Line)
 	EXEC sys.sp_executesql @sql 
@@ -210,7 +210,7 @@ BEGIN
 		('	SELECT '),
 		('		' + @fields),
 		('	FROM '),
-		('		[' + @Schema + '].[' + @Table +']')
+		('		' + @SourceTable)
 
 	IF @SourceSearchCondition IS NOT NULL
 	BEGIN
@@ -255,8 +255,6 @@ BEGIN
 		('-- delete rows that are in the target but not the source'),
 		('WHEN NOT MATCHED BY SOURCE' + ISNULL(' AND ' + @DeleteSearchCondition, '') +  ' THEN'),
 		('	DELETE')
-
-
 END
 
 INSERT @res (Line) 
@@ -271,10 +269,9 @@ BEGIN
 		('GO'),
 		(''),
 		('PRINT '''''),
-		('PRINT ''Operation applied [' + @Schema + '].[' + @Table + ']'''),
+		('PRINT ''Operation applied ' + @SourceTable + ''''),
 		('PRINT '''''),
 		('GO')
-
 END
 
 IF @IsForSSDT = 1
