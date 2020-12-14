@@ -11,4 +11,3 @@
 */
 
 :r .\Schemas\Monitoring\PreDeployment\DeploymentLog.sql
-

@@ -2,12 +2,12 @@
 	@LogId UNIQUEIDENTIFIER = NULL,
 	@Message NVARCHAR(MAX),
 	--
-    @Command NVARCHAR(MAX) = NULL, 
-    @Result NVARCHAR(500) = NULL,
+	@Command NVARCHAR(MAX) = NULL, 
+	@Result NVARCHAR(500) = NULL,
 	@Exception NVARCHAR(MAX) = NULL,
 	--
-    @ObjectType VARCHAR(255) = NULL, 
-    @ObjectName VARCHAR(255) = NULL
+	@ObjectType VARCHAR(255) = NULL, 
+	@ObjectName VARCHAR(255) = NULL
 AS
 
 	INSERT Monitoring.DeploymentLog
