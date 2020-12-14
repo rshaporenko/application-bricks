@@ -24,9 +24,11 @@ PURPOSE: Stored proc to generate repeatable data update scripts
 	 @DeleteSearchCondition VARCHAR(MAX) = NULL,
 	 
 	 @IsForSSDT BIT = 0
-AS    
+AS
+	-- parse table and schema names
+
 	DECLARE 
-		@i INT = CHARINDEX('.', @SourceTable) --'].[' for imporovement
+		@i INT = CHARINDEX('.', @SourceTable) --'].[' for improvement
 
 	DECLARE 
 		@Schema VARCHAR(100) = IIF(@i = 0, 'dbo', LEFT(@SourceTable, @i - 1)),
@@ -41,19 +43,7 @@ AS
 	SET @SourceTable = '[' + @Schema + '].[' + @Table + ']'
 
 	----
-	DECLARE
-		@fields VARCHAR(MAX), 
-		@fieldsInsert VARCHAR(MAX), 
-			
-		@primaryFieldsList VARCHAR(1000), 
-		@sql NVARCHAR(MAX)
-	
-			
-	DECLARE @fieldsUpdate TABLE (Id INT IDENTITY, Line VARCHAR(MAX))
-	DECLARE @res TABLE (Id INT IDENTITY, Line VARCHAR(MAX))
-
-	DECLARE @upd TABLE (Field VARCHAR(MAX))
-
+		
 	SET NOCOUNT ON 
 
 	DECLARE @tableId INT = (SELECT v.object_id 
@@ -62,46 +52,17 @@ AS
 									JOIN sys.schemas s ON s.schema_id = v.schema_id 
 								WHERE 
 									s.name = @Schema AND v.name = @Table)
-
-	IF @UpdateFields = '*'
-	BEGIN
-		INSERT @upd (Field)
-		SELECT
-			c.name
-		FROM
-			sys.columns AS c
-			LEFT JOIN (
-				SELECT 
-					ic.object_id, ic.column_id, i.is_primary_key 
-				FROM sys.index_columns AS ic
-					JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-			) AS tt ON c.object_id = tt.object_id AND tt.column_id = c.column_id
-		WHERE
-			c.object_id = @tableId
-			AND ISNULL(tt.is_primary_key, 0) = 0
-	END
-	ELSE 
-	BEGIN
-		-- workaround as SSDT doesn't understand STRING_SPLIT for now
-		INSERT @upd (Field) 
-		EXEC sys.sp_executesql N'SELECT RTRIM(LTRIM(value)) FROM STRING_SPLIT(@UpdateFields, '','')', N'@UpdateFields VARCHAR(MAX)', @UpdateFields
-	END
-
-
-	DECLARE
-		@SelectValuesList VARCHAR(MAX), @primaryFieldsWhere VARCHAR(MAX)
-
-
----------------------------------------------------------------------
-	DECLARE
-		@Columns TABLE 
+	
+	---------------------------------------------------------------------
+	DECLARE	@Columns TABLE 
 		(
 			Name NVARCHAR(128) NOT NULL,-- PRIMARY KEY, RS: no need to sort
 			IsIdentity BIT NOT NULL,
 			IsComputed BIT NOT NULL,
 			TypeName NVARCHAR(128) NOT NULL,
 			FullTypeName NVARCHAR(128) NOT NULL,
-			IsPrimaryKey BIT NOT NULL
+			IsPrimaryKey BIT NOT NULL,
+			ToBeUpdated BIT NOT NULL
 		)
 
 	INSERT @Columns
@@ -110,7 +71,8 @@ AS
 		c.name, c.is_identity, c.is_computed is_readonly, 
 		UPPER(t.name) type_name, 
 		UPPER(t.name) + IIF(t.name IN ('VARCHAR', 'NVARCHAR', 'CHAR', 'NCHAR', 'VARBINARY'), '(' + IIF(c.max_length = -1, 'MAX', CAST(c.max_length AS VARCHAR(100)))  + ')', '') full_type_name,
-		ISNULL(tt.is_primary_key, 0)
+		ISNULL(tt.is_primary_key, 0),
+		IIF(ISNULL(tt.is_primary_key, 0) = 0, 1, 0)
 	FROM
 		sys.columns AS c
 		JOIN sys.types t ON t.system_type_id = c.system_type_id AND t.user_type_id = c.user_type_id
@@ -121,9 +83,16 @@ AS
 	WHERE
 		c.object_id = @tableId
 
+
+	--- INSERT fields
+	DECLARE
+		@ColumnList NVARCHAR(MAX), 
+		@InsertValuesList NVARCHAR(MAX), 
+		@SelectValuesList NVARCHAR(MAX)
+		
 	SELECT 
-		@Fields = COALESCE(@Fields + ', ', '') + '[' + Name + ']',
-		@FieldsInsert = COALESCE(@FieldsInsert + ', ', '') + 's.[' + Name + ']',
+		@ColumnList = COALESCE(@ColumnList + ', ', '') + '[' + Name + ']',
+		@InsertValuesList = COALESCE(@InsertValuesList + ', ', '') + 's.[' + Name + ']',
 		@SelectValuesList = COALESCE(@SelectValuesList + ', ', '') +  
 				IIF(ISNULL(TypeName, '') IN ('CHAR', 'NCHAR', 'VARCHAR', 'NVARCHAR', 'DATETIME', 'DATE'),
 					'''+IIF([' + Name + '] IS NULL, ''NULL'', ''''''''+REPLACE([' + Name + '],'''''''','''''''''''')+'''''''')+ ''', 
@@ -131,20 +100,38 @@ AS
 	FROM 
 		@Columns
 
-	INSERT @fieldsUpdate
+	-- identify update fields
+
+	IF @UpdateFields <> '*'
+	BEGIN
+		UPDATE c
+			SET c.ToBeUpdated = IIF(u.value IS NULL, 0, 1)
+		FROM 
+			@Columns c
+			LEFT JOIN STRING_SPLIT(@UpdateFields, ',') u ON UPPER(RTRIM(LTRIM(u.value))) = UPPER(c.Name)
+		WHERE 
+			c.ToBeUpdated = 1
+	END
+
+
+	DECLARE @UpdateExpression TABLE (Id INT IDENTITY, Line NVARCHAR(MAX))
+	INSERT @UpdateExpression
 		(Line)
 	SELECT 
-		CAST('		t.[' + c.Name + '] = s.[' + c.Name + '],' AS VARCHAR(MAX))
+		CAST('		t.[' + Name + '] = s.[' + Name + '],' AS NVARCHAR(MAX))
 	FROM 
-		@Columns c
-		JOIN @upd u ON UPPER(u.Field) = UPPER(c.Name) 
-	WHERE 
-		c.IsPrimaryKey = 0
+		@Columns
+	WHERE
+		ToBeUpdated = 1
 
-	UPDATE rr SET Line = LEFT(Line, LEN(Line) - 1)
-	FROM
-		@fieldsUpdate rr
-		JOIN (SELECT TOP 1 Id FROM @fieldsUpdate ORDER BY Id DESC) r ON r.Id = rr.Id
+	UPDATE @UpdateExpression SET Line = LEFT(Line, LEN(Line) - 1)
+	WHERE
+		Id = (SELECT TOP 1 Id FROM @UpdateExpression ORDER BY Id DESC)
+
+	-----
+	DECLARE
+		@primaryFieldsList NVARCHAR(1000), 
+		@primaryFieldsWhere NVARCHAR(MAX)
 
 	SELECT 
 		@PrimaryFieldsList = COALESCE(@PrimaryFieldsList + ', ', '') + Name,
@@ -155,27 +142,28 @@ AS
 		IsPrimaryKey = 1
 
 -------------------------------------------------------------------------------------------------
-INSERT @res	(Line) 
+DECLARE @Script TABLE (Id INT IDENTITY, Line NVARCHAR(MAX))
+INSERT @Script	(Line) 
 VALUES 
-	('/* **** Generated by **** */'),
-	('-- EXEC ' + OBJECT_SCHEMA_NAME(@@PROCID) + '.' + OBJECT_NAME(@@PROCID) + ' @SourceTable = ''' + @SourceTable + '''' 
+	('/* **** Generated by ****'),
+	('EXEC ' + OBJECT_SCHEMA_NAME(@@PROCID) + '.' + OBJECT_NAME(@@PROCID) + ' @SourceTable = ''' + @SourceTable + '''' 
 		+ IIF(@UpdateFields ='*', '', ', @UpdateFields = ''' + ISNULL(@UpdateFields, NULL) + '''')
 		+ IIF(@DataSource = '^Query', ', @DataSource = ''^Query''', '')
 		+ IIF(@TargetTable IS NULL, '', ', @TargetTable = ''' + @TargetTable + '''')
 		+ IIF(@IsForSSDT = 1, ', @IsForSSDT = 1', '')
 	),
-	('')
+	('*/')
 
 IF @IsForSSDT = 1
 BEGIN
-	INSERT @res	(Line) 
+	INSERT @Script	(Line) 
 	VALUES 
 		('PRINT ''Update rows in ' + @SourceTable + ''''),
 		('GO'),
 		('')
 END
 
-INSERT @res (Line) 
+INSERT @Script (Line) 
 VALUES 
 	('MERGE ' + ISNULL(@TargetTable, @SourceTable) + ' AS t /* Target */'), 
 	('USING'), 
@@ -183,73 +171,71 @@ VALUES
 
 IF @DataSource = '^Values'
 BEGIN
-	INSERT @res (Line) 
+	INSERT @Script (Line) 
 	VALUES 
 		('	VALUES ')
 
-	SET @sql = 'SELECT ''	(' + @SelectValuesList + '),'' FROM ' + @SourceTable + ISNULL(' WHERE ' + @SourceSearchCondition, '')
+	DECLARE @sql NVARCHAR(MAX) = 'SELECT ''	(' + @SelectValuesList + '),'' FROM ' + @SourceTable + ISNULL(' WHERE ' + @SourceSearchCondition, '')
 	--print @sql
-	INSERT @res(Line)
+	INSERT @Script(Line)
 	EXEC sys.sp_executesql @sql 
 
-	UPDATE rr SET Line = LEFT(Line, LEN(Line) - 1)
-	FROM
-		@res rr
-		JOIN (SELECT TOP 1 Id FROM @res ORDER BY Id DESC) r ON r.Id = rr.Id
+	UPDATE @Script SET Line = LEFT(Line, LEN(Line) - 1)
+	WHERE Id = (SELECT TOP 1 Id FROM @Script ORDER BY Id DESC)
 END
 ELSE IF  @DataSource = '^ParamValues'
 BEGIN
-	INSERT @res (Line) 
+	INSERT @Script (Line) 
 	VALUES 
-		('	VALUES (' + @fieldsInsert + ')')
+		('	VALUES (' + @InsertValuesList + ')')
 END
 ELSE
 BEGIN
-	INSERT @res (Line) 
+	INSERT @Script (Line) 
 	VALUES 
 		('	SELECT '),
-		('		' + @fields),
+		('		' + @ColumnList),
 		('	FROM '),
 		('		' + @SourceTable)
 
 	IF @SourceSearchCondition IS NOT NULL
 	BEGIN
-		INSERT @res (Line) 
+		INSERT @Script (Line) 
 		VALUES 
 			('	WHERE ' + @SourceSearchCondition)
 	END
 END
 
 
-INSERT @res (Line) 
+INSERT @Script (Line) 
 VALUES 
 	(')'),
-	('AS s /* Source */ ' + IIF(@DataSource = '^Values', '(' + @fields + ')', '')),
+	('AS s /* Source */ ' + IIF(@DataSource = '^Values', '(' + @ColumnList + ')', '')),
 	('ON ' + @primaryFieldsWhere),
 	(''),
 	('-- insert new rows'),
 	('WHEN NOT MATCHED BY TARGET THEN'),
 	('	INSERT'),
-	('		(' +  @fields + ')'),
+	('		(' +  @ColumnList + ')'),
 	('	VALUES'),
-	('		(' +  @fieldsInsert + ')')
+	('		(' +  @InsertValuesList + ')')
 
-IF @Operations LIKE '%UPDATE%' AND EXISTS(SELECT NULL FROM @fieldsUpdate) 
+IF @Operations LIKE '%UPDATE%' AND EXISTS(SELECT NULL FROM @UpdateExpression) 
 BEGIN
-	INSERT @res (Line) 
+	INSERT @Script (Line) 
 	VALUES 
 		(''),
 		('-- update matched rows'),
 		('WHEN MATCHED THEN'),
 		('	UPDATE SET')
 
-	INSERT @res (Line) 
-	SELECT Line FROM @fieldsUpdate
+	INSERT @Script (Line) 
+	SELECT Line FROM @UpdateExpression
 END
 
 IF @Operations LIKE '%DELETE%'-- AND EXISTS(SELECT NULL FROM @fieldsUpdate)
 BEGIN
-	INSERT @res (Line) 
+	INSERT @Script (Line) 
 	VALUES 
 		(''),
 		('-- delete rows that are in the target but not the source'),
@@ -257,13 +243,13 @@ BEGIN
 		('	DELETE')
 END
 
-INSERT @res (Line) 
+INSERT @Script (Line) 
 VALUES 
 	(';')
 
 IF @IsForSSDT = 1
 BEGIN
-	INSERT @res
+	INSERT @Script
 		(Line) 
 	VALUES
 		('GO'),
@@ -279,7 +265,7 @@ BEGIN
 	SELECT @Table + '.sql' as ScriptFileName
 END
 
-SELECT Line AS Script FROM @res ORDER BY Id ASC
+SELECT Line AS Script FROM @Script ORDER BY Id ASC
 
 IF @IsForSSDT = 1
 BEGIN
